@@ -6,6 +6,7 @@ import time
 PORT_SCAN_THRESHOLD = 20      # unique ports in time window
 SYN_FLOOD_THRESHOLD = 100     # SYN packets in time window
 TIME_WINDOW = 5               # seconds
+COOLDOWN = 10                 # to prevent duplicate alerts
 
 # State tracking
 
@@ -21,21 +22,35 @@ syn_flood_tracker = defaultdict(list)
 # { ip: mac }
 arp_table = {}
 
+# Cooldown tracking
+# { (attack_type, src_ip): last_alert_timestamp }
+cooldown_tracker = {}
 
-# ─── Helpers ──────────────────────────────────────────────
+# Helpers
 
+# This will ensure that only recent activity is looked at
 def get_recent(entries, now):
     """Filter entries to only those within the time window."""
     return [t for t in entries if now - t < TIME_WINDOW]
 
+def is_on_cooldown(attack_type, src_ip, now):
+    """Returns True if this IP was already alerted recently."""
+    key = (attack_type, src_ip)
+    last_alerted = cooldown_tracker.get(key, 0)
+    return (now - last_alerted) < COOLDOWN
 
-# ─── Detection Rules ──────────────────────────────────────
+def set_cooldown(attack_type, src_ip, now):
+    """Record that we just alerted for this IP."""
+    cooldown_tracker[(attack_type, src_ip)] = now
+
+# Detection Rules
 
 def detect_port_scan(src_ip, dst_port, flags, now):
     """
-    Attacker sends SYN packets to many different ports.
-    We track unique destination ports per source IP.
+    In most basic port scans, attackers sends SYN packets to many different ports.
+    This will track unique destination ports per source IP.
     """
+
     if "S" not in str(flags):
         return None
 
@@ -43,12 +58,15 @@ def detect_port_scan(src_ip, dst_port, flags, now):
 
     # Keep only recent (timestamp, port) entries
     recent = [(t, p) for t, p in tracker if now - t < TIME_WINDOW]
-    recent.append((now, dst_port))
+    recent.append((now, dst_port)) # adds current packet
     port_scan_tracker[src_ip] = recent
 
     unique_ports = set(p for _, p in recent)
 
     if len(unique_ports) > PORT_SCAN_THRESHOLD:
+        if is_on_cooldown("PORT_SCAN", src_ip, now):
+            return None
+        set_cooldown("PORT_SCAN", src_ip, now)
         return {
             "attack_type": "PORT_SCAN",
             "source_ip": src_ip,
@@ -59,8 +77,9 @@ def detect_port_scan(src_ip, dst_port, flags, now):
 
 def detect_syn_flood(src_ip, dst_ip, flags, now):
     """
-    Attacker sends massive SYN packets to overwhelm a target.
-    We track SYN rate per source IP.
+    This detects a type of DoS attack where attackers send massive
+    amount of SYN packets to overwhelm targets.
+    This tracks the SYN rate per a source IP
     """
     if "S" not in str(flags):
         return None
@@ -71,6 +90,9 @@ def detect_syn_flood(src_ip, dst_ip, flags, now):
     syn_flood_tracker[src_ip] = recent
 
     if len(recent) > SYN_FLOOD_THRESHOLD:
+        if is_on_cooldown("SYN_FLOOD", src_ip, now):
+            return None                               
+        set_cooldown("SYN_FLOOD", src_ip, now)
         return {
             "attack_type": "SYN_FLOOD",
             "source_ip": src_ip,
@@ -79,14 +101,18 @@ def detect_syn_flood(src_ip, dst_ip, flags, now):
     return None
 
 
-def detect_arp_spoof(src_ip, src_mac):
+def detect_arp_spoof(src_ip, src_mac, now):
     """
-    Attacker sends ARP replies claiming to be a legitimate IP.
-    We detect when an IP's MAC address changes unexpectedly.
+    Arp spoofing involves an attacker sending ARP replies claiming to be a legitimate IP.
+    This detects when an IP's MAC address changes unexpectedly.
     """
     if src_ip in arp_table:
         known_mac = arp_table[src_ip]
         if known_mac != src_mac:
+            if is_on_cooldown("ARP_SPOOF", src_ip, now):
+                return None
+            set_cooldown("ARP_SPOOF", src_ip, now)
+            arp_table[src_ip] = src_mac
             return {
                 "attack_type": "ARP_SPOOF",
                 "source_ip": src_ip,
@@ -99,7 +125,7 @@ def detect_arp_spoof(src_ip, src_mac):
     return None
 
 
-# ─── Main entry point ─────────────────────────────────────
+# Main entry point
 
 def analyze_packet(packet):
     """
@@ -131,7 +157,7 @@ def analyze_packet(packet):
         src_ip = packet[ARP].psrc
         src_mac = packet[ARP].hwsrc
 
-        alert = detect_arp_spoof(src_ip, src_mac)
+        alert = detect_arp_spoof(src_ip, src_mac, now)
         if alert:
             alerts.append(alert)
 
