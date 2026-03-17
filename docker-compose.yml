@@ -1,4 +1,15 @@
 services:
+  ids:
+    build: .
+    container_name: ids-app
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
   prometheus:
     image: prom/prometheus:latest
     container_name: ids-prometheus

@@ -1,6 +1,5 @@
 FROM python:3.12-slim
 
-# Required for Scapy raw socket access
 RUN apt-get update && apt-get install -y \
     libpcap-dev \
     iproute2 \
@@ -13,5 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Needs to run as root for raw packet capture
+# Create required directories
+RUN mkdir -p data logs
+
 CMD ["python", "-m", "ids.sniffer"]
